@@ -1,0 +1,40 @@
+# Core AI Agent Dependencies - Ydays Lab
+# Simplified stack focusing on portfolio projects
+
+# LLM APIs
+openai>=1.0.0
+anthropic>=0.18.0
+python-dotenv>=1.0.0
+
+# AI Frameworks - Core
+langchain>=0.1.0
+langchain-openai>=0.1.0
+langchain-community>=0.1.0
+langgraph>=0.1.0
+
+# Multi-Agent Frameworks
+crewai>=0.1.0
+autogen-agentchat>=0.2.0
+
+# Vector Databases & Embeddings
+chromadb>=0.4.0
+tiktoken>=0.5.0
+
+# Data Handling
+pydantic>=2.0.0
+requests>=2.31.0
+
+# Web Framework (for portfolio projects)
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+
+# CLI & Output
+click>=8.1.0
+rich>=13.0.0
+
+# Data Science (for analytics projects)
+numpy>=1.24.0
+pandas>=2.0.0
+
+# Monitoring (optional for production)
+prometheus-client>=0.17.0

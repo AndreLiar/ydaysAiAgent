@@ -1,0 +1,267 @@
+# GitHub Actions CI/CD Pipeline for AI Agents
+name: AI Agents CI/CD
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  PYTHON_VERSION: '3.11'
+  NODE_VERSION: '18'
+
+jobs:
+  # Testing Job
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: test_pass
+          POSTGRES_USER: test_user
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+      
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+        cache: 'pip'
+    
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install -r requirements-dev.txt || echo "No dev requirements"
+    
+    - name: Create Test Environment
+      run: |
+        cp .env.template .env
+        echo "DATABASE_URL=postgresql://test_user:test_pass@localhost:5432/test_db" >> .env
+        echo "REDIS_URL=redis://localhost:6379/0" >> .env
+        echo "OPENAI_API_KEY=test-key-for-ci" >> .env
+    
+    - name: Lint Code
+      run: |
+        # Install linters if available
+        pip install black ruff mypy || true
+        
+        # Run linters (continue on error for now)
+        black --check . || echo "Black formatting check failed"
+        ruff check . || echo "Ruff linting failed"
+        mypy shared/ || echo "MyPy type checking failed"
+    
+    - name: Run Unit Tests
+      run: |
+        # Run tests if they exist
+        if [ -d "tests" ]; then
+          python -m pytest tests/ -v --tb=short
+        else
+          echo "No test directory found"
+        fi
+    
+    - name: Test Agent Functionality
+      run: |
+        # Test basic agent functionality
+        python -c "
+        import sys
+        sys.path.append('.')
+        try:
+            from shared.base_agent import BaseAgent
+            from shared.tools import ToolRegistry
+            from shared.memory import SimpleMemory
+            print('✅ Basic imports successful')
+        except Exception as e:
+            print(f'❌ Import failed: {e}')
+            sys.exit(1)
+        "
+    
+    - name: Security Scan
+      run: |
+        # Install security scanner
+        pip install safety bandit || true
+        
+        # Check for known vulnerabilities
+        safety check || echo "Safety check completed with warnings"
+        
+        # Static security analysis
+        bandit -r shared/ 04-portfolio-projects/ || echo "Bandit scan completed"
+
+  # Build Docker Image
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+    
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_TOKEN }}
+    
+    - name: Build and Push Docker Image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: 05-deployment/docker/Dockerfile
+        push: true
+        tags: |
+          ${{ secrets.DOCKER_USERNAME }}/ai-agents:latest
+          ${{ secrets.DOCKER_USERNAME }}/ai-agents:${{ github.sha }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  # Deploy to Staging
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    environment: staging
+    
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+    
+    - name: Deploy to Railway (Staging)
+      run: |
+        # Install Railway CLI
+        npm install -g @railway/cli
+        
+        # Deploy to staging
+        railway login --token ${{ secrets.RAILWAY_TOKEN }}
+        railway environment staging
+        railway up --detach
+      env:
+        RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    
+    - name: Run Staging Health Check
+      run: |
+        # Wait for deployment
+        sleep 60
+        
+        # Check staging health
+        curl -f ${{ secrets.STAGING_URL }}/health || exit 1
+        echo "✅ Staging deployment healthy"
+
+  # Deploy to Production
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+    
+    - name: Deploy to Production
+      run: |
+        # Deploy to production (Railway/Heroku/Cloud Run)
+        npm install -g @railway/cli
+        railway login --token ${{ secrets.RAILWAY_TOKEN }}
+        railway environment production
+        railway up --detach
+      env:
+        RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    
+    - name: Run Production Health Check
+      run: |
+        # Wait for deployment
+        sleep 90
+        
+        # Check production health
+        curl -f ${{ secrets.PRODUCTION_URL }}/health || exit 1
+        echo "✅ Production deployment healthy"
+    
+    - name: Notify Deployment Success
+      uses: 8398a7/action-slack@v3
+      if: success()
+      with:
+        status: success
+        text: '🚀 AI Agents deployed to production successfully!'
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+    
+    - name: Notify Deployment Failure
+      uses: 8398a7/action-slack@v3
+      if: failure()
+      with:
+        status: failure
+        text: '❌ AI Agents deployment to production failed!'
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+
+  # Performance Tests (Post-deployment)
+  performance-test:
+    name: Performance Testing
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+    
+    - name: Install k6
+      run: |
+        sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+        echo "deb https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+        sudo apt-get update
+        sudo apt-get install k6
+    
+    - name: Run Load Tests
+      run: |
+        # Create basic load test
+        cat > loadtest.js << 'EOF'
+        import http from 'k6/http';
+        import { check } from 'k6';
+        
+        export let options = {
+          vus: 10,
+          duration: '30s',
+        };
+        
+        export default function() {
+          let response = http.get('${{ secrets.PRODUCTION_URL }}/health');
+          check(response, {
+            'status is 200': (r) => r.status === 200,
+            'response time < 500ms': (r) => r.timings.duration < 500,
+          });
+        }
+        EOF
+        
+        k6 run loadtest.js
